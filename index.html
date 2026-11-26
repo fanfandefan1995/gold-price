@@ -219,6 +219,7 @@ canvas#sparkline {
 }
 .metal-item .m-name { font-size: 0.7em; color: var(--text-dim); }
 .metal-item .m-price { font-size: 1.1em; font-weight: 600; margin-top: 4px; }
+.metal-item .m-unit { font-size: 0.62em; color: var(--text-dim); margin-top: 2px; }
 
 /* Refresh Button */
 .refresh-btn {
@@ -391,14 +392,17 @@ canvas#sparkline {
   <div class="metal-item">
     <div class="m-name">白银</div>
     <div class="m-price" id="silverPrice">--</div>
+    <div class="m-unit">元/克</div>
   </div>
   <div class="metal-item">
     <div class="m-name">铂金</div>
     <div class="m-price" id="platinumPrice">--</div>
+    <div class="m-unit">元/克</div>
   </div>
   <div class="metal-item">
     <div class="m-name">钯金</div>
     <div class="m-price" id="palladiumPrice">--</div>
+    <div class="m-unit">元/克</div>
   </div>
 </div>
 
@@ -629,15 +633,18 @@ function updateUI(data) {
   }
   
   // Exchange rate (implied)
+  let impliedFx = 0;
   if (data.usdPerOz > 0 && data.cnyPerG > 0) {
-    const impliedFx = (data.cnyPerG * 31.1035) / data.usdPerOz;
+    impliedFx = (data.cnyPerG * 31.1035) / data.usdPerOz;
     document.getElementById('fxRate').textContent = impliedFx.toFixed(4);
   }
-  
-  // Other metals
-  if (data.silver) document.getElementById('silverPrice').textContent = '$' + data.silver.toFixed(2);
-  if (data.platinum) document.getElementById('platinumPrice').textContent = '$' + data.platinum.toFixed(0);
-  if (data.palladium) document.getElementById('palladiumPrice').textContent = '$' + data.palladium.toFixed(0);
+
+  // Other metals: 美元/盎司 → 人民币元/克（与黄金同口径换算）
+  const toCnyPerG = usd => (usd > 0 && impliedFx > 0)
+    ? (usd * impliedFx / 31.1035).toFixed(2) : '--';
+  document.getElementById('silverPrice').textContent = toCnyPerG(data.silver);
+  document.getElementById('platinumPrice').textContent = toCnyPerG(data.platinum);
+  document.getElementById('palladiumPrice').textContent = toCnyPerG(data.palladium);
   
   // Cost comparison
   updateCostDisplay(data.cnyPerG);
