@@ -454,6 +454,28 @@ try {
   if (saved) Object.assign(state, JSON.parse(saved));
 } catch(e) {}
 
+// ===== Price History (localStorage 按天持久化) =====
+function todayKey() {
+  const d = new Date();
+  return d.getFullYear() + '-' + (d.getMonth() + 1) + '-' + d.getDate();
+}
+function loadPriceHistory() {
+  try {
+    const raw = localStorage.getItem('goldPriceHistory');
+    if (!raw) return [];
+    const obj = JSON.parse(raw);
+    if (obj.date !== todayKey()) return []; // 跨天重置
+    return obj.items.map(it => ({ time: new Date(it.t), price: it.p }));
+  } catch(e) { return []; }
+}
+function savePriceHistory() {
+  try {
+    const items = state.priceHistory.slice(-2000).map(d => ({ t: d.time.getTime(), p: d.price }));
+    localStorage.setItem('goldPriceHistory', JSON.stringify({ date: todayKey(), items }));
+  } catch(e) {}
+}
+state.priceHistory = loadPriceHistory();
+
 // ===== API Sources =====
 // Source 1: goldprice.org (direct international+CNY)
 async function fetchFromGoldPriceOrg() {
@@ -481,44 +503,53 @@ async function fetchFromGoldPriceOrg() {
   };
 }
 
-// Source 2: gold-api.com (simple XAU price)
+// Source 2: gold-api.com (XAU + 其他贵金属)
 async function fetchFromGoldApi() {
-  const [goldResp, fxResp] = await Promise.all([
-    fetch('https://api.gold-api.com/price/XAU', { signal: AbortSignal.timeout(8000) }),
-    fetch('https://open.er-api.com/v6/latest/USD', { signal: AbortSignal.timeout(8000) })
+  const j = u => fetch(u, { signal: AbortSignal.timeout(8000) }).then(r => r.json()).catch(() => ({}));
+  const [xau, xag, xpt, xpd, fx] = await Promise.all([
+    j('https://api.gold-api.com/price/XAU'),
+    j('https://api.gold-api.com/price/XAG'),
+    j('https://api.gold-api.com/price/XPT'),
+    j('https://api.gold-api.com/price/XPD'),
+    j('https://open.er-api.com/v6/latest/USD')
   ]);
-  const goldData = await goldResp.json();
-  const fxData = await fxResp.json();
-  const usdPerOz = goldData?.price || 0;
+  const usdPerOz = xau?.price || 0;
   if (!usdPerOz) throw new Error('gold-api no price');
-  const usdCny = fxData?.rates?.CNY || 7.25;
+  const usdCny = fx?.rates?.CNY || 7.25;
   const cnyPerG = (usdPerOz * usdCny) / 31.1035;
   return {
     usdPerOz,
     cnyPerG,
     usdChange: 0, cnyChange: 0, usdChangeAbs: 0, cnyChangeAbs: 0,
-    silver: 0, platinum: 0, palladium: 0,
+    silver: xag?.price || 0,
+    platinum: xpt?.price || 0,
+    palladium: xpd?.price || 0,
     ts: Date.now(),
     source: 'gold-api + er-api'
   };
 }
 
-// Source 3: er-api only (exchange fallback, needs XAU from other source)
+// Source 3: er-api + gold-api 贵金属
 async function fetchFromExchange() {
-  const fxResp = await fetch('https://open.er-api.com/v6/latest/XAU', {
-    signal: AbortSignal.timeout(8000)
-  });
-  const fxData = await fxResp.json();
-  if (fxData?.result !== 'success' && !fxData?.rates) throw new Error('er-api failed');
-  const usdPerOz = fxData?.rates?.USD || 0;
-  const cnyPerOz = fxData?.rates?.CNY || 0;
+  const j = u => fetch(u, { signal: AbortSignal.timeout(8000) }).then(r => r.json()).catch(() => ({}));
+  const [fx, xag, xpt, xpd] = await Promise.all([
+    j('https://open.er-api.com/v6/latest/XAU'),
+    j('https://api.gold-api.com/price/XAG'),
+    j('https://api.gold-api.com/price/XPT'),
+    j('https://api.gold-api.com/price/XPD')
+  ]);
+  if (fx?.result !== 'success' && !fx?.rates) throw new Error('er-api failed');
+  const usdPerOz = fx?.rates?.USD || 0;
+  const cnyPerOz = fx?.rates?.CNY || 0;
   const cnyPerG = cnyPerOz / 31.1035;
   if (!usdPerOz && !cnyPerG) throw new Error('er-api no gold data');
   return {
     usdPerOz,
     cnyPerG,
     usdChange: 0, cnyChange: 0, usdChangeAbs: 0, cnyChangeAbs: 0,
-    silver: 0, platinum: 0, palladium: 0,
+    silver: xag?.price || 0,
+    platinum: xpt?.price || 0,
+    palladium: xpd?.price || 0,
     ts: Date.now(),
     source: 'er-api(XAU)'
   };
@@ -550,12 +581,12 @@ async function fetchGoldPrice() {
   updateUI(result);
   setStatus('ok', `已更新 · ${result.source}`);
   
-  // Record price for chart
-  state.priceHistory.push({
-    time: new Date(),
-    price: result.cnyPerG
-  });
-  if (state.priceHistory.length > 120) state.priceHistory.shift(); // Keep 1hr
+  // Record price for chart (persist per-day)
+  if (result.cnyPerG > 0) {
+    state.priceHistory.push({ time: new Date(), price: result.cnyPerG });
+    if (state.priceHistory.length > 2000) state.priceHistory.shift();
+    savePriceHistory();
+  }
   drawChart();
 }
 
@@ -644,27 +675,29 @@ function drawChart() {
   canvas.height = rect.height * dpr;
   ctx.scale(dpr, dpr);
   const w = rect.width, h = rect.height;
-  
   ctx.clearRect(0, 0, w, h);
-  
+
   const data = state.priceHistory;
   if (data.length < 2) {
     ctx.fillStyle = '#8888aa';
     ctx.font = '12px sans-serif';
     ctx.textAlign = 'center';
-    ctx.fillText('数据采集中，请稍候...', w/2, h/2);
+    ctx.fillText('数据采集中，当日走势会自动累积保存（关掉重开不丢）', w/2, h/2);
     return;
   }
-  
+
   const prices = data.map(d => d.price);
-  const min = Math.min(...prices) * 0.999;
-  const max = Math.max(...prices) * 1.001;
-  const range = max - min || 1;
-  
-  const padTop = 10, padBottom = 20, padLeft = 5, padRight = 5;
-  const chartH = h - padTop - padBottom;
-  const chartW = w - padLeft - padRight;
-  
+  const times = data.map(d => d.time.getTime());
+  const min = Math.min(...prices), max = Math.max(...prices);
+  const pad = (max - min) * 0.1 || 1;
+  const lo = min - pad, hi = max + pad, range = hi - lo || 1;
+  const t0 = times[0], t1 = times[times.length - 1], tSpan = (t1 - t0) || 1;
+
+  const padTop = 16, padBottom = 22, padLeft = 8, padRight = 8;
+  const chartH = h - padTop - padBottom, chartW = w - padLeft - padRight;
+  const X = t => padLeft + ((t - t0) / tSpan) * chartW;
+  const Y = p => padTop + chartH - ((p - lo) / range) * chartH;
+
   // Grid lines
   ctx.strokeStyle = 'rgba(255,255,255,0.05)';
   ctx.lineWidth = 0.5;
@@ -672,48 +705,45 @@ function drawChart() {
     const y = padTop + chartH * (i / 4);
     ctx.beginPath(); ctx.moveTo(padLeft, y); ctx.lineTo(w - padRight, y); ctx.stroke();
   }
-  
+
   // Line
   const gradient = ctx.createLinearGradient(0, 0, 0, h);
   gradient.addColorStop(0, 'rgba(255,215,0,0.3)');
   gradient.addColorStop(1, 'rgba(255,215,0,0)');
-  
   ctx.beginPath();
   ctx.strokeStyle = '#ffd700';
   ctx.lineWidth = 2;
   ctx.lineJoin = 'round';
-  
   for (let i = 0; i < data.length; i++) {
-    const x = padLeft + (i / (data.length - 1)) * chartW;
-    const y = padTop + chartH - ((prices[i] - min) / range) * chartH;
-    if (i === 0) ctx.moveTo(x, y);
-    else ctx.lineTo(x, y);
+    const x = X(times[i]), y = Y(prices[i]);
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
   }
   ctx.stroke();
-  
+
   // Fill area
-  const lastX = padLeft + chartW;
-  ctx.lineTo(lastX, h - padBottom);
-  ctx.lineTo(padLeft, h - padBottom);
+  ctx.lineTo(X(t1), h - padBottom);
+  ctx.lineTo(X(t0), h - padBottom);
   ctx.closePath();
   ctx.fillStyle = gradient;
   ctx.fill();
-  
+
   // Latest point
-  const lastY = padTop + chartH - ((prices[prices.length-1] - min) / range) * chartH;
   ctx.beginPath();
-  ctx.arc(lastX, lastY, 4, 0, Math.PI * 2);
+  ctx.arc(X(t1), Y(prices[prices.length - 1]), 4, 0, Math.PI * 2);
   ctx.fillStyle = '#ffd700';
   ctx.fill();
-  
-  // Price labels
+
+  // Labels: 高/低 + 时间范围
   ctx.fillStyle = '#8888aa';
   ctx.font = '10px sans-serif';
   ctx.textAlign = 'left';
-  ctx.fillText(max.toFixed(1), padLeft, padTop + 10);
-  ctx.fillText(min.toFixed(1), padLeft, h - padBottom - 2);
+  ctx.fillText('高 ' + max.toFixed(1), padLeft, padTop + 9);
+  ctx.fillText('低 ' + min.toFixed(1), padLeft, h - padBottom - 2);
+  const fmt = ts => new Date(ts).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
   ctx.textAlign = 'right';
-  ctx.fillText(`点数: ${data.length}`, w - padRight, h - 4);
+  ctx.fillText(fmt(t0) + ' → ' + fmt(t1), w - padRight, h - 4);
+  ctx.textAlign = 'center';
+  ctx.fillText('点数 ' + data.length, w / 2, h - 4);
 }
 
 // ===== Timers =====
@@ -792,6 +822,7 @@ document.addEventListener('visibilitychange', () => {
 });
 
 // ===== Init =====
+drawChart();
 fetchGoldPrice();
 startAutoRefresh();
 
