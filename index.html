@@ -480,7 +480,7 @@ state.priceHistory = loadPriceHistory();
 // Source 1: goldprice.org (direct international+CNY)
 async function fetchFromGoldPriceOrg() {
   const resp = await fetch('https://data-asg.goldprice.org/dbXRates/USD,CNY', {
-    signal: AbortSignal.timeout(10000),
+    signal: AbortSignal.timeout(6000),
     headers: { 'Accept': 'application/json' }
   });
   if (!resp.ok) throw new Error('goldprice.org HTTP ' + resp.status);
@@ -558,29 +558,38 @@ async function fetchFromExchange() {
 async function fetchGoldPrice() {
   setStatus('loading', '获取数据中...');
   let result = null;
-  const methods = state.source === 'goldprice'
-    ? [fetchFromGoldPriceOrg]
-    : state.source === '计算'
-    ? [fetchFromGoldApi, fetchFromExchange]
-    : [fetchFromGoldPriceOrg, fetchFromGoldApi, fetchFromExchange];
-  for (const fn of methods) {
-    try {
-      result = await fn();
-      if (result.usdPerOz > 0 || result.cnyPerG > 0) break;
-    } catch (e) {
-      console.warn(fn.name, e.message);
-      continue;
+
+  if (state.source === 'goldprice') {
+    // 仅 goldprice（含涨跌幅，但国内可能超时）
+    try { result = await fetchFromGoldPriceOrg(); } catch (e) { console.warn(e.message); }
+  } else if (state.source === '计算') {
+    // 仅 gold-api
+    try { result = await fetchFromGoldApi(); } catch (e) { console.warn(e.message); }
+  } else {
+    // auto：gold-api 为主（CORS稳、含贵金属），并行用 goldprice 补充涨跌幅
+    const [apiRes, gpRes] = await Promise.allSettled([
+      fetchFromGoldApi(),
+      fetchFromGoldPriceOrg()
+    ]);
+    result = apiRes.status === 'fulfilled' ? apiRes.value
+           : (gpRes.status === 'fulfilled' ? gpRes.value : null);
+    // gold-api 成功但缺涨跌幅时，用 goldprice 的涨跌幅补充
+    if (result && apiRes.status === 'fulfilled' && gpRes.status === 'fulfilled') {
+      const g = gpRes.value;
+      result.usdChange = g.usdChange; result.usdChangeAbs = g.usdChangeAbs;
+      result.cnyChange = g.cnyChange; result.cnyChangeAbs = g.cnyChangeAbs;
+      result.source = 'gold-api + goldprice';
     }
   }
-  
+
   if (!result || (!result.usdPerOz && !result.cnyPerG)) {
     setStatus('error', '数据获取失败，请检查网络');
     return;
   }
-  
+
   updateUI(result);
   setStatus('ok', `已更新 · ${result.source}`);
-  
+
   // Record price for chart (persist per-day)
   if (result.cnyPerG > 0) {
     state.priceHistory.push({ time: new Date(), price: result.cnyPerG });
