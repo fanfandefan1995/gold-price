@@ -465,12 +465,12 @@ function loadPriceHistory() {
     if (!raw) return [];
     const obj = JSON.parse(raw);
     if (obj.date !== todayKey()) return []; // 跨天重置
-    return obj.items.map(it => ({ time: new Date(it.t), price: it.p }));
+    return obj.items.map(it => ({ time: new Date(it.t), price: it.p, usd: it.u }));
   } catch(e) { return []; }
 }
 function savePriceHistory() {
   try {
-    const items = state.priceHistory.slice(-2000).map(d => ({ t: d.time.getTime(), p: d.price }));
+    const items = state.priceHistory.slice(-2000).map(d => ({ t: d.time.getTime(), p: d.price, u: d.usd }));
     localStorage.setItem('goldPriceHistory', JSON.stringify({ date: todayKey(), items }));
   } catch(e) {}
 }
@@ -592,11 +592,16 @@ async function fetchGoldPrice() {
 
   // Record price for chart (persist per-day)
   if (result.cnyPerG > 0) {
-    state.priceHistory.push({ time: new Date(), price: result.cnyPerG });
+    state.priceHistory.push({ time: new Date(), price: result.cnyPerG, usd: result.usdPerOz });
     if (state.priceHistory.length > 2000) state.priceHistory.shift();
     savePriceHistory();
   }
   drawChart();
+
+  // 日内涨跌兑底：无外部涨跌幅时，用当天首点作今开
+  if (!result.cnyChange && !result.usdChange && state.priceHistory.length >= 2) {
+    renderIntradayChange();
+  }
 }
 
 // ===== UI Update =====
@@ -672,6 +677,29 @@ function setStatus(type, text) {
   const dot = document.getElementById('statusDot');
   dot.className = 'status-dot ' + (type === 'ok' ? '' : type);
   document.getElementById('statusText').textContent = text;
+}
+
+// 日内涨跌（相对当天第一个采集点）
+function renderIntradayChange() {
+  const first = state.priceHistory[0];
+  const cur = state.priceHistory[state.priceHistory.length - 1];
+  if (!first || !cur || !first.price || !cur.price) return;
+  // 国内 CNY
+  const cnyDiff = cur.price - first.price;
+  const cnyPct = cnyDiff / first.price * 100;
+  const cnyEl = document.getElementById('cnyChange');
+  const s1 = cnyDiff >= 0 ? '+' : '';
+  cnyEl.textContent = `${s1}${cnyDiff.toFixed(2)} (${s1}${cnyPct.toFixed(2)}%) 日内`;
+  cnyEl.className = 'change ' + (cnyDiff >= 0 ? 'up' : 'down');
+  // 国际 USD（需 history 存了 usd）
+  if (first.usd && cur.usd) {
+    const usdDiff = cur.usd - first.usd;
+    const usdPct = usdDiff / first.usd * 100;
+    const usdEl = document.getElementById('usdChange');
+    const s2 = usdDiff >= 0 ? '+' : '';
+    usdEl.textContent = `${s2}${usdDiff.toFixed(1)} (${s2}${usdPct.toFixed(2)}%) 日内`;
+    usdEl.className = 'card-change ' + (usdDiff >= 0 ? 'up' : 'down');
+  }
 }
 
 // ===== Chart =====
